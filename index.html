@@ -176,7 +176,7 @@ const fmt=ms=>{ms=Math.max(0,Math.floor((ms||0)/1000));return Math.floor(ms/60)+
 const curCat=()=>S.cats.find(c=>c.id===S.current);
 const col=c=>COLORS[c?.color]||COLORS.blue;
 let toastT;
-function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),4200)}
+function toast(msg){const t=$('#toast');const host=document.querySelector('dialog[open]')||document.body;if(t.parentNode!==host)host.appendChild(t);t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),4200)}
 function parsePlaylistId(s){s=(s||'').trim();const m=s.match(/playlist[/:]([A-Za-z0-9]{22})/);if(m)return m[1];return /^[A-Za-z0-9]{22}$/.test(s)?s:null}
 const ICON_PLAY='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg>';
 const ICON_PAUSE='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
@@ -257,7 +257,9 @@ async function loadPlaylist(id){
 async function preloadAll(){for(const c of S.cats) if(c.playlist&&!S.cache[c.playlist]) await loadPlaylist(c.playlist)}
 
 /* ---------- Playback ---------- */
-const keepUri=()=>S.keepAlive?'spotify:track:'+S.keepAlive:null;
+const keepUri=()=>!S.keepAlive?null:S.keepAlive.startsWith('spotify:')?S.keepAlive:'spotify:track:'+S.keepAlive;
+const parseKeep=s=>{s=(s||'').trim();const m=s.match(/(track|episode)[/:]([A-Za-z0-9]{22})/);return m?`spotify:${m[1]}:${m[2]}`:''};
+const keepLink=()=>{const u=keepUri();if(!u)return '';const [,type,id]=u.split(':');return `https://open.spotify.com/${type}/${id}`};
 let standby=false;
 // Re-find the chosen device. Phone device IDs can change, and phones drop off the list when Spotify goes idle.
 async function resolveDevice(){
@@ -348,11 +350,12 @@ async function poll(){
   clearTimeout(pollT);
   if(tok&&!document.hidden){
     try{
-      const j=await api('/me/player',{query:{additional_types:'track'}});
+      const j=await api('/me/player',{query:{additional_types:'track,episode'}});
       devState=j?.device||null;
       let t=j?.item;
       standby=!!(t&&t.uri===keepUri());if(standby)t=null;
-      now=t?{uri:t.uri,name:t.name,artist:(t.artists||[]).map(a=>a.name).join(', '),img:(t.album?.images?.[2]||t.album?.images?.[0]||{}).url||'',dur:t.duration_ms,progress:j.progress_ms||0,playing:!!j.is_playing,ts:Date.now()}:null;
+      const im=t?.album?.images||t?.images||[];
+      now=t?{uri:t.uri,name:t.name,artist:t.artists?t.artists.map(a=>a.name).join(', '):(t.show?.name||''),img:(im[2]||im[0]||{}).url||'',dur:t.duration_ms,progress:j.progress_ms||0,playing:!!j.is_playing,ts:Date.now()}:null;
       renderNow();renderHeader();
     }catch{}
   }
@@ -495,8 +498,8 @@ function openSetup(){
     <div class="actions" style="margin-top:8px"><button class="btn" type="button" data-act="copy">Copy redirect URI</button></div>
     <label for="cid">Client ID</label><input id="cid" value="${esc(S.clientId)}" autocomplete="off" spellcheck="false">
     <div class="actions">${tok?'<button class="btn warn" type="button" data-act="logout">Disconnect</button>':'<button class="btn primary" type="button" data-act="login">Connect Spotify</button>'}</div>
-    <label for="ka">Keep-alive track (link to a silent track)</label>
-    <input id="ka" value="${S.keepAlive?'https://open.spotify.com/track/'+S.keepAlive:''}" placeholder="Optional, but recommended for phones" autocomplete="off">
+    <label for="ka">Keep-alive (link to a silent track or podcast episode)</label>
+    <input id="ka" value="${esc(keepLink())}" placeholder="Optional, but recommended for phones" autocomplete="off">
     <p>Phones drop off Spotify Connect soon after Spotify pauses. With this set, Fade out loops the silent track instead of pausing, so the phone stays ready for the next song.</p>
     <h4>Categories</h4>
     <p>Each category uses one playlist that you own or collaborate on.</p>
@@ -538,8 +541,8 @@ $('#setBody').addEventListener('click',async e=>{
   if(a==='cancel') $('#dlgSet').close();
   if(a==='savecfg'){
     const cats=readCats();if(!cats)return;
-    const kaRaw=$('#ka').value.trim(),ka=kaRaw.match(/track[/:]([A-Za-z0-9]{22})/)?.[1]||(/^[A-Za-z0-9]{22}$/.test(kaRaw)?kaRaw:'');
-    if(kaRaw&&!ka){toast('The keep-alive link needs to be a Spotify track link.');$('#ka').focus();return}
+    const kaRaw=$('#ka').value.trim(),ka=parseKeep(kaRaw);
+    if(kaRaw&&!ka){toast('The keep-alive link needs to be a Spotify track or episode link.');$('#ka').focus();return}
     S.keepAlive=ka;
     S.clientId=$('#cid').value.trim();S.cats=cats;
     if(!S.cats.find(c=>c.id===S.current)) S.current=S.cats[0]?.id||null;
