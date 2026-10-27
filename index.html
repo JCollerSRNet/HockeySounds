@@ -158,7 +158,7 @@ const defCats=()=>[
   ['Their penalty','amber','hit'],['Our penalty','purple','hit'],['Power play','green','hit'],
   ['Stoppage','sky','hit'],['Timeout','sky','hit'],['Intermission','blue','run'],['Win','red','hit']
 ].map(([name,color,mode])=>({id:uid(),name,color,mode,playlist:''}));
-const defaults=()=>({clientId:'',deviceId:'',deviceName:'',current:null,cats:defCats(),cues:{},cache:{}});
+const defaults=()=>({clientId:'',deviceId:'',deviceName:'',current:null,cats:defCats(),cues:{},cache:{},keepAlive:''});
 
 let S=(()=>{try{return Object.assign(defaults(),JSON.parse(localStorage.getItem(LS)||'{}'))}catch{return defaults()}})();
 let tok=(()=>{try{return JSON.parse(localStorage.getItem(TK)||'null')}catch{return null}})();
@@ -257,6 +257,37 @@ async function loadPlaylist(id){
 async function preloadAll(){for(const c of S.cats) if(c.playlist&&!S.cache[c.playlist]) await loadPlaylist(c.playlist)}
 
 /* ---------- Playback ---------- */
+const keepUri=()=>S.keepAlive?'spotify:track:'+S.keepAlive:null;
+let standby=false;
+// Re-find the chosen device. Phone device IDs can change, and phones drop off the list when Spotify goes idle.
+async function resolveDevice(){
+  const ds=(await api('/me/player/devices'))?.devices||[];
+  let d=ds.find(x=>x.id===S.deviceId)||(S.deviceName&&ds.find(x=>x.name===S.deviceName))||null;
+  if(d&&d.id!==S.deviceId){S.deviceId=d.id;save()}
+  if(!d&&!S.deviceId) d=ds.find(x=>x.is_active)||null;
+  return d;
+}
+async function sendPlay(body){
+  try{return await api('/me/player/play',{method:'PUT',body,query:devQuery()})}
+  catch(e){
+    if(e.status!==404&&e.reason!=='NO_ACTIVE_DEVICE') throw e;
+    const d=await resolveDevice();
+    if(!d){const err=new Error('No device');err.nodevice=true;throw err}
+    return api('/me/player/play',{method:'PUT',body,query:{device_id:d.id}});
+  }
+}
+// Stop the music. With a keep-alive track set, loop silence instead of pausing so the phone stays on Spotify Connect.
+async function stopAudio(){
+  const k=keepUri();
+  if(!k) return api('/me/player/pause',{method:'PUT',query:devQuery()});
+  await sendPlay({uris:[k]});
+  standby=true;
+  await api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
+}
+function noDevice(){
+  toast((S.deviceName||'Your phone')+' dropped off Spotify Connect. Open Spotify, tap play, then come back.');
+  openDevices();
+}
 async function playTrack(cat,t,startOverride){
   fadeJob++;fading=false;
   const pos=startOverride??S.cues[t.uri]??0;
@@ -264,23 +295,23 @@ async function playTrack(cat,t,startOverride){
     ?{context_uri:'spotify:playlist:'+cat.playlist,offset:{uri:t.uri},position_ms:pos}
     :{uris:[t.uri],position_ms:pos};
   now={uri:t.uri,name:t.name,artist:t.artist,img:t.img,dur:t.dur,progress:pos,playing:true,ts:Date.now()};
-  renderNow();
+  standby=false;renderNow();
   try{
-    try{await api('/me/player/play',{method:'PUT',body,query:devQuery()})}
-    catch(e){if(e.status===404&&S.deviceId){await api('/me/player/play',{method:'PUT',body})}else throw e}
+    await sendPlay(body);
+    if(keepUri()) api('/me/player/repeat',{method:'PUT',query:{state:'off',...devQuery()}}).catch(()=>{});
     if(savedVol!=null){const v=savedVol;savedVol=null;api('/me/player/volume',{method:'PUT',query:{volume_percent:v,...devQuery()}}).catch(()=>{})}
     setTimeout(poll,900);
   }catch(e){
     now=null;renderNow();
-    if(e.status===404||e.reason==='NO_ACTIVE_DEVICE'){toast('Spotify isn’t reachable. Open the Spotify app on the device, play anything for a second, then pick it here.');openDevices()}
+    if(e.nodevice||e.status===404) noDevice();
     else if(e.status===403) toast('Spotify refused playback. This needs a Premium account.');
     else toast(e.message);
   }
 }
 async function fadeOut(){
-  const q=devQuery();
-  if(fading){fadeJob++;fading=false;await api('/me/player/pause',{method:'PUT',query:q}).catch(()=>{});restoreVol();return}
-  const job=++fadeJob;
+  const fail=e=>e.nodevice||e.status===404?noDevice():toast(e.message);
+  if(fading){fadeJob++;fading=false;await stopAudio().catch(fail);restoreVol();return}
+  const job=++fadeJob,q=devQuery();
   if(devState?.supports_volume&&(savedVol??devState.volume_percent)>0){
     fading=true;const start=savedVol??devState.volume_percent;savedVol=start;
     for(let i=1;i<=6;i++){
@@ -289,13 +320,14 @@ async function fadeOut(){
       await sleep(260);
     }
     if(job!==fadeJob) return;
-    await api('/me/player/pause',{method:'PUT',query:q}).catch(()=>{});
+    await stopAudio().catch(fail);
     fading=false;await sleep(350);
     if(job===fadeJob) restoreVol();
   }else{
-    await api('/me/player/pause',{method:'PUT',query:q}).catch(e=>toast(e.message));
+    await stopAudio().catch(fail);
   }
-  if(now){now.playing=false;now.progress=livePos();now.ts=Date.now()}
+  if(keepUri()) now=null;
+  else if(now){now.playing=false;now.progress=livePos();now.ts=Date.now()}
   renderNow();
 }
 function restoreVol(){if(savedVol==null)return;const v=savedVol;savedVol=null;api('/me/player/volume',{method:'PUT',query:{volume_percent:v,...devQuery()}}).catch(()=>{})}
@@ -318,7 +350,8 @@ async function poll(){
     try{
       const j=await api('/me/player',{query:{additional_types:'track'}});
       devState=j?.device||null;
-      const t=j?.item;
+      let t=j?.item;
+      standby=!!(t&&t.uri===keepUri());if(standby)t=null;
       now=t?{uri:t.uri,name:t.name,artist:(t.artists||[]).map(a=>a.name).join(', '),img:(t.album?.images?.[2]||t.album?.images?.[0]||{}).url||'',dur:t.duration_ms,progress:j.progress_ms||0,playing:!!j.is_playing,ts:Date.now()}:null;
       renderNow();renderHeader();
     }catch{}
@@ -377,7 +410,7 @@ function renderClock(){
   $('#prog').style.width=now?.dur?(Math.min(100,pos/now.dur*100)+'%'):'0';
 }
 function renderNow(){
-  $('#nowTitle').textContent=now?.name||'Nothing playing';
+  $('#nowTitle').textContent=now?.name||(standby?'Standing by':'Nothing playing');
   $('#nowArtist').textContent=now?.artist||(tok?'Tap a song to start':'Connect Spotify to start');
   const a=$('#nowArt');if(now?.img){a.src=now.img;a.style.visibility='visible'}else a.style.visibility='hidden';
   $('#ppBtn').innerHTML=now?.playing?ICON_PAUSE:ICON_PLAY;
@@ -396,7 +429,11 @@ async function openDevices(){
   b.innerHTML='<h3>Play on</h3><p>Looking for devices…</p>';
   try{
     const ds=(await api('/me/player/devices'))?.devices||[];
-    b.innerHTML=`<h3>Play on</h3><p>Don’t see your phone or speaker? Open the Spotify app on it, play anything for a second, then refresh.</p>
+    const missing=S.deviceName&&!ds.some(d=>d.id===S.deviceId||d.name===S.deviceName);
+    b.innerHTML=`<h3>Play on</h3>
+      ${missing?`<p><strong>${esc(S.deviceName)} isn’t showing.</strong> Phones only appear while Spotify is open or playing.</p>`:''}
+      <p>Open Spotify, start any song, then come back and tap Refresh.</p>
+      <div class="actions" style="margin-top:8px"><a class="btn primary" href="spotify:" style="display:inline-grid;place-items:center;text-decoration:none">Open Spotify</a></div>
       <button type="button" class="dev" data-dev="" aria-current="${!S.deviceId}">Whatever is playing<small>${S.deviceId?'':'Selected'}</small></button>
       ${ds.map(d=>`<button type="button" class="dev" data-dev="${esc(d.id)}" data-name="${esc(d.name)}" aria-current="${d.id===S.deviceId}">${esc(d.name)}<small>${d.id===S.deviceId?'Selected':d.is_active?'Active':esc(d.type)}${d.supports_volume?'':', no fade'}</small></button>`).join('')}
       <div class="actions"><button class="btn" type="button" data-act="devrefresh">Refresh</button><button class="btn" type="button" data-act="close">Done</button></div>`;
@@ -458,6 +495,9 @@ function openSetup(){
     <div class="actions" style="margin-top:8px"><button class="btn" type="button" data-act="copy">Copy redirect URI</button></div>
     <label for="cid">Client ID</label><input id="cid" value="${esc(S.clientId)}" autocomplete="off" spellcheck="false">
     <div class="actions">${tok?'<button class="btn warn" type="button" data-act="logout">Disconnect</button>':'<button class="btn primary" type="button" data-act="login">Connect Spotify</button>'}</div>
+    <label for="ka">Keep-alive track (link to a silent track)</label>
+    <input id="ka" value="${S.keepAlive?'https://open.spotify.com/track/'+S.keepAlive:''}" placeholder="Optional, but recommended for phones" autocomplete="off">
+    <p>Phones drop off Spotify Connect soon after Spotify pauses. With this set, Fade out loops the silent track instead of pausing, so the phone stays ready for the next song.</p>
     <h4>Categories</h4>
     <p>Each category uses one playlist that you own or collaborate on.</p>
     <div id="catEdit">${S.cats.map(catRow).join('')}</div>
@@ -498,6 +538,9 @@ $('#setBody').addEventListener('click',async e=>{
   if(a==='cancel') $('#dlgSet').close();
   if(a==='savecfg'){
     const cats=readCats();if(!cats)return;
+    const kaRaw=$('#ka').value.trim(),ka=kaRaw.match(/track[/:]([A-Za-z0-9]{22})/)?.[1]||(/^[A-Za-z0-9]{22}$/.test(kaRaw)?kaRaw:'');
+    if(kaRaw&&!ka){toast('The keep-alive link needs to be a Spotify track link.');$('#ka').focus();return}
+    S.keepAlive=ka;
     S.clientId=$('#cid').value.trim();S.cats=cats;
     if(!S.cats.find(c=>c.id===S.current)) S.current=S.cats[0]?.id||null;
     const used=new Set(cats.map(c=>c.playlist));for(const k of Object.keys(S.cache)) if(!used.has(k)) delete S.cache[k];
