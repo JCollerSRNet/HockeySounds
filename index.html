@@ -53,17 +53,23 @@ button{cursor:pointer;font-family:inherit}
 .rand{margin-left:auto;flex:none;height:50px;padding:0 18px;border:0;border-radius:10px;background:var(--c);color:#fff;font:700 20px 'Barlow Condensed','Arial Narrow',sans-serif}
 .small{flex:none;height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--muted);font:500 13px Barlow}
 .hint{margin:0 12px 10px;padding:8px 10px;border-radius:8px;background:var(--surface);border:1px dashed var(--c);font-size:14px}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px 8px;padding:0 12px 16px}
-@media (min-width:560px){.grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}
-.tile{position:relative;padding:0;border:0;background:none;color:inherit;text-align:left;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
-.tile .art{display:block;width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:var(--line);transition:transform .08s}
-.tile:active .art{transform:scale(.95)}
-.tile .t{margin-top:5px;font:600 15px/1.1 'Barlow Condensed','Arial Narrow',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.tile .a{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tile .cue{position:absolute;top:5px;left:5px;padding:3px 5px;border-radius:4px;background:rgba(7,18,34,.85);color:var(--led);font:600 13px/1 'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums}
-.tile.on .art{outline:3px solid var(--c);outline-offset:2px}
-.tile.on::after{content:"";position:absolute;top:7px;right:7px;width:11px;height:11px;border-radius:50%;background:#FF3B2F;box-shadow:0 0 8px 2px rgba(255,59,47,.75)}
-body.editing .tile .art{opacity:.7}
+.list{list-style:none;margin:0;padding:0 12px 16px}
+.tile{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line)}
+.tile .play{flex:1;min-width:0;min-height:58px;display:flex;align-items:center;gap:10px;padding:6px 4px;border:0;border-radius:8px;background:none;color:inherit;text-align:left;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
+.tile .play:active{background:var(--surface)}
+.tile .art{flex:none;width:44px;height:44px;border-radius:6px;object-fit:cover;background:var(--line)}
+.tile .txt{flex:1;min-width:0}
+.tile .t,.tile .a{display:block}
+.tile .t{font:600 18px/1.15 'Barlow Condensed','Arial Narrow',sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .a{font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .cue{flex:none;padding:4px 6px;border-radius:4px;background:#0C1B2E;color:var(--led);font:600 14px/1 'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums}
+.tile .go{flex:none;width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--c);color:#fff}
+.tile .go svg{width:16px;height:16px;margin-left:2px}
+.tile .ed{flex:none;width:46px;height:46px;border-radius:10px;border:1.5px dashed var(--c);background:var(--surface);color:var(--ink);display:grid;place-items:center;padding:0}
+.tile .ed svg{width:20px;height:20px}
+.tile.on .art{outline:3px solid var(--c);outline-offset:1px}
+.tile.on .t{color:var(--c)}
+.tile.on .go{background:#FF3B2F;box-shadow:0 0 10px 2px rgba(255,59,47,.6)}
 .empty{margin:8px 12px;padding:18px 16px;border-radius:12px;background:var(--surface);border:1px solid var(--line)}
 .empty h3{margin:0 0 6px;font:700 22px 'Barlow Condensed',sans-serif}
 .empty p{margin:0 0 12px;color:var(--muted);font-size:15px;line-height:1.4}
@@ -353,12 +359,17 @@ function renderPanel(){
   p.innerHTML=`<div class="phead"><div><h2>${esc(cat.name)}</h2><p>${c.tracks.length} songs, ${mode}</p></div>
     <button class="small" type="button" data-act="reload" aria-label="Reload playlist">Reload</button>
     <button class="rand" type="button" data-act="random"${c.tracks.length?'':' disabled'}>Random</button></div>
-    ${editing?'<div class="hint">Tap a song to choose where it starts. Tap the pencil again when you’re done.</div>':''}
+    ${editing?'<div class="hint">Tap the pencil beside a song to set where it starts. Tap the pencil at the top again when you’re done.</div>':''}
     ${c.tracks.length?'':'<div class="empty"><p>This playlist has no playable songs.</p></div>'}
-    <div class="grid" id="grid">${c.tracks.map(t=>`<button type="button" class="tile${now?.uri===t.uri?' on':''}" data-uri="${esc(t.uri)}">
-      ${t.img?`<img class="art" src="${esc(t.img)}" alt="" loading="lazy" draggable="false">`:'<div class="art"></div>'}
-      ${S.cues[t.uri]?`<span class="cue">${fmt(S.cues[t.uri])}</span>`:''}
-      <div class="t">${esc(t.name)}</div><div class="a">${esc(t.artist)}</div></button>`).join('')}</div>`;
+    <ul class="list">${c.tracks.map(t=>`<li class="tile${now?.uri===t.uri?' on':''}" data-uri="${esc(t.uri)}">
+      <button type="button" class="play" data-play aria-label="Play ${esc(t.name)}">
+        ${t.img?`<img class="art" src="${esc(t.img)}" alt="" loading="lazy" draggable="false">`:'<span class="art"></span>'}
+        <span class="txt"><span class="t">${esc(t.name)}</span><span class="a">${esc(t.artist)}</span></span>
+        ${S.cues[t.uri]?`<span class="cue" title="Starts at">${fmt(S.cues[t.uri])}</span>`:''}
+        <span class="go" aria-hidden="true">${ICON_PLAY}</span>
+      </button>
+      ${editing?`<button type="button" class="ed" data-edit aria-label="Set start point for ${esc(t.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13 7l4 4"/></svg></button>`:''}
+    </li>`).join('')}</ul>`;
 }
 function renderClock(){
   const pos=livePos();
@@ -507,14 +518,11 @@ $('#panel').addEventListener('click',e=>{
     lastRandom[cat.id]=pick.uri;return playTrack(cat,pick);
   }
   const tile=e.target.closest('.tile');if(!tile)return;
-  if(lpFired){lpFired=false;return}
-  if(editing) return openCue(tile.dataset.uri);
-  const t=S.cache[cat.playlist]?.tracks.find(x=>x.uri===tile.dataset.uri);if(t)playTrack(cat,t);
+  if(e.target.closest('[data-edit]')) return openCue(tile.dataset.uri);
+  if(e.target.closest('[data-play]')){
+    const t=S.cache[cat.playlist]?.tracks.find(x=>x.uri===tile.dataset.uri);if(t)playTrack(cat,t);
+  }
 });
-// Long-press a song to set its start point
-let lpT,lpFired=false;
-$('#panel').addEventListener('pointerdown',e=>{const tile=e.target.closest('.tile');if(!tile)return;lpFired=false;clearTimeout(lpT);lpT=setTimeout(()=>{lpFired=true;navigator.vibrate?.(15);openCue(tile.dataset.uri)},500)});
-['pointerup','pointercancel','pointermove'].forEach(ev=>$('#panel').addEventListener(ev,e=>{if(ev==='pointermove'&&Math.abs(e.movementX)+Math.abs(e.movementY)<6)return;clearTimeout(lpT)}));
 $('#panel').addEventListener('contextmenu',e=>{if(e.target.closest('.tile'))e.preventDefault()});
 
 $('#fadeBtn').addEventListener('click',fadeOut);
