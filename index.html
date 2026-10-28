@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#0C1B2E" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Rink Board</title>
+<title>Rink Board v0.7</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
@@ -33,6 +33,7 @@ button{cursor:pointer;font-family:inherit}
 /* Header */
 .top{position:sticky;top:0;z-index:5;background:var(--bg);display:flex;align-items:center;gap:8px;padding:calc(8px + env(safe-area-inset-top)) 12px 8px}
 .brand{display:flex;align-items:center;gap:8px;margin-right:auto;font:700 23px/1 'Barlow Condensed','Arial Narrow',sans-serif}
+.ver{font:500 13px Barlow,sans-serif;color:var(--muted);align-self:flex-end;margin-bottom:2px}
 .lamp{width:12px;height:12px;border-radius:50%;background:var(--line);transition:background .2s,box-shadow .2s}
 .lamp.on{background:#FF3B2F;box-shadow:0 0 10px 2px rgba(255,59,47,.7)}
 .pill{height:40px;max-width:42vw;padding:0 12px;border-radius:20px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:500 14px Barlow;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -119,7 +120,7 @@ code{display:block;padding:8px;border-radius:6px;background:var(--bg);font-size:
 <body>
 
 <header class="top">
-  <div class="brand"><span class="lamp" id="lamp" aria-hidden="true"></span>Rink Board</div>
+  <div class="brand"><span class="lamp" id="lamp" aria-hidden="true"></span>Rink Board<small class="ver" id="ver"></small></div>
   <button class="pill" id="devBtn" type="button">Pick device</button>
   <button class="iconbtn" id="editBtn" type="button" aria-pressed="false" aria-label="Set start points">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13 7l4 4"/></svg>
@@ -148,6 +149,7 @@ code{display:block;padding:8px;border-radius:6px;background:var(--bg);font-size:
 
 <script>
 /* ---------- State ---------- */
+const VERSION='0.7'; // bump on every change so you can tell when the new build is live
 const LS='rinkboard.v1', TK='rinkboard.tok', PK='rinkboard.pkce';
 const SCOPES='user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative';
 const REDIRECT=location.origin+location.pathname;
@@ -158,11 +160,12 @@ const defCats=()=>[
   ['Their penalty','amber','hit'],['Our penalty','purple','hit'],['Power play','green','hit'],
   ['Stoppage','sky','hit'],['Timeout','sky','hit'],['Intermission','blue','run'],['Win','red','hit']
 ].map(([name,color,mode])=>({id:uid(),name,color,mode,playlist:''}));
-const defaults=()=>({clientId:'',deviceId:'',deviceName:'',current:null,cats:defCats(),cues:{},cache:{},keepAlive:''});
+const defaults=()=>({clientId:'',deviceId:'',deviceName:'',current:null,cats:defCats(),cues:{},cache:{},keepPl:''});
 
 let S=(()=>{try{return Object.assign(defaults(),JSON.parse(localStorage.getItem(LS)||'{}'))}catch{return defaults()}})();
 let tok=(()=>{try{return JSON.parse(localStorage.getItem(TK)||'null')}catch{return null}})();
 const save=()=>localStorage.setItem(LS,JSON.stringify(S));
+delete S.keepAlive; // replaced by the silence playlist in v0.7
 if(!S.current||!S.cats.find(c=>c.id===S.current)) S.current=S.cats[0]?.id||null;
 
 let now=null, devState=null, editing=false, fading=false, fadeJob=0, savedVol=null;
@@ -255,12 +258,12 @@ async function loadPlaylist(id){
       :e.message;
   }finally{loading.delete(id);renderPanel()}
 }
-async function preloadAll(){for(const c of S.cats) if(c.playlist&&!S.cache[c.playlist]) await loadPlaylist(c.playlist)}
+async function preloadAll(){
+  for(const id of [S.keepPl,...S.cats.map(c=>c.playlist)]) if(id&&!S.cache[id]) await loadPlaylist(id);
+}
 
 /* ---------- Playback ---------- */
-const keepUri=()=>!S.keepAlive?null:S.keepAlive.startsWith('spotify:')?S.keepAlive:'spotify:track:'+S.keepAlive;
-const parseKeep=s=>{s=(s||'').trim();const m=s.match(/(track|episode)[/:]([A-Za-z0-9]{22})/);return m?`spotify:${m[1]}:${m[2]}`:''};
-const keepLink=()=>{const u=keepUri();if(!u)return '';const [,type,id]=u.split(':');return `https://open.spotify.com/${type}/${id}`};
+const silTracks=()=>S.keepPl?(S.cache[S.keepPl]?.tracks||[]).map(x=>x.uri):[];
 let standby=false;
 // Re-find the chosen device. Phone device IDs can change, and phones drop off the list when Spotify goes idle.
 async function resolveDevice(){
@@ -279,14 +282,13 @@ async function sendPlay(body){
     return api('/me/player/play',{method:'PUT',body,query:{device_id:d.id}});
   }
 }
-// Stop the music. With a keep-alive track set, loop silence instead of pausing so the phone stays on Spotify Connect.
+// Stop the music. With a silence playlist set, switch straight to it on loop instead of pausing,
+// so the phone never sits idle long enough to drop off Spotify Connect.
 async function stopAudio(){
-  const k=keepUri();
-  if(!k) return api('/me/player/pause',{method:'PUT',query:devQuery()});
-  busyUntil=Date.now()+3000;
-  await sendPlay({uris:[k]});
+  if(!S.keepPl) return api('/me/player/pause',{method:'PUT',query:devQuery()});
+  await sendPlay({context_uri:'spotify:playlist:'+S.keepPl});
   standby=true;
-  await api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
+  await api('/me/player/repeat',{method:'PUT',query:{state:'context',...devQuery()}}).catch(()=>{});
 }
 function noDevice(){
   toast((S.deviceName||'Your phone')+' dropped off Spotify Connect. Open Spotify, tap play, then come back.');
@@ -295,19 +297,19 @@ function noDevice(){
 async function playTrack(cat,t,startOverride){
   fadeJob++;fading=false;
   const pos=startOverride??S.cues[t.uri]??0;
-  // With a keep-alive set, the silent track is queued right after the music, so Spotify goes
-  // straight from the last song into silence with no paused gap for the phone to drop off in.
-  const k=keepUri(),tr=S.cache[cat.playlist]?.tracks||[];
+  // With a silence playlist set, its tracks are queued right after the music, so a song that
+  // ends on its own rolls straight into silence instead of pausing.
+  const sil=silTracks().slice(0,20),tr=S.cache[cat.playlist]?.tracks||[];
   let body;
   if(cat.mode==='run'&&cat.playlist){
-    if(k){const i=Math.max(0,tr.findIndex(x=>x.uri===t.uri));body={uris:[...tr.slice(i,i+99).map(x=>x.uri),k],position_ms:pos}}
+    if(S.keepPl){const i=Math.max(0,tr.findIndex(x=>x.uri===t.uri));body={uris:[...tr.slice(i,i+100-sil.length).map(x=>x.uri),...sil],position_ms:pos}}
     else body={context_uri:'spotify:playlist:'+cat.playlist,offset:{uri:t.uri},position_ms:pos};
-  }else body={uris:k?[t.uri,k]:[t.uri],position_ms:pos};
+  }else body={uris:[t.uri,...sil],position_ms:pos};
   now={uri:t.uri,name:t.name,artist:t.artist,img:t.img,dur:t.dur,progress:pos,playing:true,ts:Date.now()};
-  standby=false;busyUntil=Date.now()+3000;renderNow();
+  standby=false;renderNow();
   try{
     await sendPlay(body);
-    if(keepUri()) api('/me/player/repeat',{method:'PUT',query:{state:'off',...devQuery()}}).catch(()=>{});
+    if(S.keepPl) api('/me/player/repeat',{method:'PUT',query:{state:'off',...devQuery()}}).catch(()=>{});
     if(savedVol!=null){const v=savedVol;savedVol=null;api('/me/player/volume',{method:'PUT',query:{volume_percent:v,...devQuery()}}).catch(()=>{})}
     setTimeout(poll,900);
   }catch(e){
@@ -335,14 +337,14 @@ async function fadeOut(){
   }else{
     await stopAudio().catch(fail);
   }
-  if(keepUri()) now=null;
+  if(S.keepPl) now=null;
   else if(now){now.playing=false;now.progress=livePos();now.ts=Date.now()}
   renderNow();
 }
 function restoreVol(){if(savedVol==null)return;const v=savedVol;savedVol=null;api('/me/player/volume',{method:'PUT',query:{volume_percent:v,...devQuery()}}).catch(()=>{})}
 async function togglePlay(){
   if(!tok) return;
-  if(keepUri()){
+  if(S.keepPl){
     if(!now){toast('Standing by. Tap a song to play.');return}
     fadeJob++;fading=false;
     try{await stopAudio();now=null;renderNow();restoreVol()}
@@ -359,22 +361,6 @@ async function togglePlay(){
 }
 function livePos(){if(!now)return 0;return Math.min(now.dur||Infinity,now.progress+(now.playing?Date.now()-now.ts:0))}
 
-/* Watchdog: whenever nothing is playing (song ended, playlist ran out, Spotify got interrupted),
-   switch to the keep-alive track before the phone drops off Spotify Connect. */
-let busyUntil=0,reviving=false,dropWarned=false;
-async function watchdog(j){
-  if(!keepUri()||reviving||fading||Date.now()<busyUntil) return;
-  const playing=!!j?.is_playing;
-  if(playing){
-    dropWarned=false;
-    if(standby&&j.repeat_state!=='track') api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
-    return;
-  }
-  reviving=true;
-  try{await stopAudio();dropWarned=false;renderNow()}
-  catch(e){if((e.nodevice||e.status===404)&&!dropWarned){dropWarned=true;noDevice()}}
-  finally{reviving=false}
-}
 let pollT;
 async function poll(){
   clearTimeout(pollT);
@@ -383,11 +369,10 @@ async function poll(){
       const j=await api('/me/player',{query:{additional_types:'track,episode'}});
       devState=j?.device||null;
       let t=j?.item;
-      standby=!!(t&&t.uri===keepUri());if(standby)t=null;
+      standby=!!S.keepPl&&(j?.context?.uri==='spotify:playlist:'+S.keepPl||(!!t&&silTracks().includes(t.uri)));if(standby)t=null;
       const im=t?.album?.images||t?.images||[];
       now=t?{uri:t.uri,name:t.name,artist:t.artists?t.artists.map(a=>a.name).join(', '):(t.show?.name||''),img:(im[2]||im[0]||{}).url||'',dur:t.duration_ms,progress:j.progress_ms||0,playing:!!j.is_playing,ts:Date.now()}:null;
       renderNow();renderHeader();
-      watchdog(j);
     }catch{}
   }
   pollT=setTimeout(poll,2000);
@@ -448,7 +433,7 @@ function renderNow(){
   $('#nowArtist').textContent=now?.artist||(standby?'Keeping Spotify awake':tok?'Tap a song to start':'Connect Spotify to start');
   const a=$('#nowArt');if(now?.img){a.src=now.img;a.style.visibility='visible'}else a.style.visibility='hidden';
   const pp=$('#ppBtn');
-  if(keepUri()){pp.innerHTML=ICON_STOP;pp.setAttribute('aria-label','Stop');pp.style.visibility=now?'visible':'hidden'}
+  if(S.keepPl){pp.innerHTML=ICON_STOP;pp.setAttribute('aria-label','Stop');pp.style.visibility=now?'visible':'hidden'}
   else{pp.innerHTML=now?.playing?ICON_PAUSE:ICON_PLAY;pp.setAttribute('aria-label','Play or pause');pp.style.visibility='visible'}
   $('#fadeBtn').textContent=devState&&!devState.supports_volume?'Stop':'Fade out';
   $('#lamp').classList.toggle('on',!!now?.playing);
@@ -514,72 +499,114 @@ $('#cueBody').addEventListener('click',e=>{
 });
 
 /* ---------- Settings ---------- */
+let myPls=null,myPlsErr='';
+async function fetchMyPlaylists(){
+  const me=await api('/me');const out=[];
+  let path='/me/playlists',query={limit:50};
+  while(path){
+    const j=await api(path,{query});
+    for(const p of j?.items||[]){
+      if(!p||!(p.owner?.id===me.id||p.collaborative)) continue; // Spotify only shares songs from these
+      out.push({id:p.id,name:p.name,n:p.items?.total??p.tracks?.total??null});
+    }
+    if(j?.next){const u=new URL(j.next);path=u.pathname.replace(/^\/v1/,'');query=Object.fromEntries(u.searchParams)}else path=null;
+  }
+  myPls=out.sort((a,b)=>a.name.localeCompare(b.name));
+}
+// A playlist picker: dropdown of your playlists, with a paste-a-link fallback
+function picker(sel,label,noneText){
+  const opts=myPls||[];
+  const known=!sel||opts.some(p=>p.id===sel);
+  if(!myPls) return `<div class="pick"><input class="plink" value="${sel?'https://open.spotify.com/playlist/'+sel:''}" placeholder="Spotify playlist link" aria-label="${esc(label)}" autocomplete="off"></div>`;
+  return `<div class="pick"><select class="psel" aria-label="${esc(label)}">
+      <option value="">${esc(noneText)}</option>
+      ${known?'':`<option value="${esc(sel)}" selected>${esc(S.cache[sel]?.name||'Playlist from a link')}</option>`}
+      ${opts.map(p=>`<option value="${esc(p.id)}"${p.id===sel?' selected':''}>${esc(p.name)}${p.n!=null?' ('+p.n+')':''}</option>`).join('')}
+      <option value="__link">Paste a link instead…</option>
+    </select>
+    <input class="plink" hidden placeholder="Spotify playlist link" aria-label="${esc(label)} link" autocomplete="off"></div>`;
+}
+function readPick(el){
+  const sel=el.querySelector('.psel'),link=el.querySelector('.plink');
+  if(sel&&sel.value!=='__link') return {ok:true,id:sel.value};
+  const raw=link.value.trim();if(!raw) return {ok:true,id:''};
+  const id=parsePlaylistId(raw);
+  if(!id){toast('That doesn’t look like a playlist link: '+raw.slice(0,60));link.focus();return {ok:false}}
+  return {ok:true,id};
+}
 function catRow(c){
   return `<div class="catrow" data-id="${c.id}" style="--c:${col(c)}">
     <div class="row"><input class="nm" value="${esc(c.name)}" aria-label="Category name">
       <select class="cl" aria-label="Colour">${Object.keys(COLORS).map(k=>`<option value="${k}"${k===c.color?' selected':''}>${k}</option>`).join('')}</select></div>
-    <input class="pl" value="${c.playlist?'https://open.spotify.com/playlist/'+c.playlist:''}" placeholder="Spotify playlist link" aria-label="Playlist link" autocomplete="off">
+    ${picker(c.playlist,'Playlist for '+c.name,'Choose a playlist')}
     <select class="md" aria-label="When a song is tapped"><option value="hit"${c.mode!=='run'?' selected':''}>Tap plays one song</option><option value="run"${c.mode==='run'?' selected':''}>Tap keeps playing the playlist</option></select>
     <div class="actions" style="margin-top:8px"><button class="btn" type="button" data-act="up">Move up</button><button class="btn warn" type="button" data-act="del">Remove</button></div>
   </div>`;
 }
-function openSetup(){
+async function openSetup(draft){
+  if(!$('#dlgSet').open) $('#dlgSet').showModal();
+  if(tok&&!myPls){
+    $('#setBody').innerHTML='<h3>Settings</h3><p>Loading your playlists…</p>';
+    try{await fetchMyPlaylists();myPlsErr=''}catch(e){myPlsErr=e.message}
+  }
+  const d=draft||{cats:S.cats,keepPl:S.keepPl,clientId:S.clientId};
   $('#setBody').innerHTML=`<h3>Settings</h3>
     <h4>Spotify</h4>
     <p>Create an app at developer.spotify.com, add this exact redirect URI to it, then paste its Client ID here.</p>
     <code id="redir">${esc(REDIRECT)}</code>
     <div class="actions" style="margin-top:8px"><button class="btn" type="button" data-act="copy">Copy redirect URI</button></div>
-    <label for="cid">Client ID</label><input id="cid" value="${esc(S.clientId)}" autocomplete="off" spellcheck="false">
+    <label for="cid">Client ID</label><input id="cid" value="${esc(d.clientId)}" autocomplete="off" spellcheck="false">
     <div class="actions">${tok?'<button class="btn warn" type="button" data-act="logout">Disconnect</button>':'<button class="btn primary" type="button" data-act="login">Connect Spotify</button>'}</div>
-    <label for="ka">Keep-alive (link to a silent track or podcast episode)</label>
-    <input id="ka" value="${esc(keepLink())}" placeholder="Optional, but recommended for phones" autocomplete="off">
-    <p>Phones drop off Spotify Connect soon after Spotify pauses. With this set, Fade out loops the silent track instead of pausing, so the phone stays ready for the next song.</p>
+    <h4>Silence playlist</h4>
+    <p>Phones drop off Spotify Connect soon after Spotify pauses. With this set, every stop switches straight to this playlist on loop, and songs roll into it when they end. Fill it with silent tracks.</p>
+    <div id="keepPick">${picker(d.keepPl,'Silence playlist','None (pause instead)')}</div>
     <h4>Categories</h4>
-    <p>Each category uses one playlist that you own or collaborate on.</p>
-    <div id="catEdit">${S.cats.map(catRow).join('')}</div>
+    <p>${myPls?'Pick a playlist for each category. Only playlists you own or collaborate on are listed, because Spotify won’t share songs from others.':myPlsErr?'Couldn’t load your playlists ('+esc(myPlsErr)+'). Paste links instead.':'Connect Spotify to pick from your playlists, or paste links.'}</p>
+    ${tok?'<div class="actions" style="margin-top:6px"><button class="btn" type="button" data-act="refreshpls">Refresh playlist list</button></div>':''}
+    <div id="catEdit">${d.cats.map(catRow).join('')}</div>
     <div class="actions"><button class="btn" type="button" data-act="add">Add category</button></div>
     <h4>Backup</h4>
     <p>Copy this text somewhere safe to keep your categories and start points. Paste a backup here and tap Import to restore.</p>
     <textarea id="bk" spellcheck="false"></textarea>
     <div class="actions"><button class="btn" type="button" data-act="export">Show backup</button><button class="btn" type="button" data-act="import">Import</button><button class="btn" type="button" data-act="reloadall">Reload all playlists</button></div>
     <div class="actions" style="position:sticky;bottom:0;background:var(--surface);padding:10px 0 0"><button class="btn" type="button" data-act="cancel">Cancel</button><button class="btn primary" type="button" data-act="savecfg">Save</button></div>`;
-  if(!$('#dlgSet').open) $('#dlgSet').showModal();
 }
-function readCats(){
-  const out=[];
+function readDraft(){
+  const cats=[];
   for(const r of document.querySelectorAll('#catEdit .catrow')){
-    const raw=r.querySelector('.pl').value.trim(),pid=parsePlaylistId(raw);
-    if(raw&&!pid){toast('That doesn’t look like a playlist link: '+raw.slice(0,60));r.querySelector('.pl').focus();return null}
-    out.push({id:r.dataset.id,name:r.querySelector('.nm').value.trim()||'Untitled',color:r.querySelector('.cl').value,mode:r.querySelector('.md').value,playlist:pid||''});
+    const p=readPick(r.querySelector('.pick'));if(!p.ok) return null;
+    cats.push({id:r.dataset.id,name:r.querySelector('.nm').value.trim()||'Untitled',color:r.querySelector('.cl').value,mode:r.querySelector('.md').value,playlist:p.id});
   }
-  return out;
+  const k=readPick($('#keepPick .pick'));if(!k.ok) return null;
+  return {cats,keepPl:k.id,clientId:$('#cid').value.trim()};
 }
-$('#setBody').addEventListener('change',e=>{if(e.target.classList.contains('cl'))e.target.closest('.catrow').style.setProperty('--c',COLORS[e.target.value])});
+$('#setBody').addEventListener('change',e=>{
+  if(e.target.classList.contains('cl'))e.target.closest('.catrow').style.setProperty('--c',COLORS[e.target.value]);
+  if(e.target.classList.contains('psel')){const l=e.target.parentNode.querySelector('.plink');l.hidden=e.target.value!=='__link';if(!l.hidden)l.focus()}
+});
 $('#setBody').addEventListener('click',async e=>{
   const btn=e.target.closest('[data-act]');if(!btn)return;const a=btn.dataset.act;
   if(a==='copy'){try{await navigator.clipboard.writeText(REDIRECT);toast('Redirect URI copied.')}catch{toast('Copy failed. Select the text and copy it.')}}
   if(a==='login'){S.clientId=$('#cid').value.trim();save();login()}
-  if(a==='logout'){signOut();openSetup()}
+  if(a==='logout'){signOut();myPls=null;openSetup()}
+  if(a==='refreshpls'){const d=readDraft();if(!d)return;myPls=null;openSetup(d)}
   if(a==='add'){$('#catEdit').insertAdjacentHTML('beforeend',catRow({id:uid(),name:'New category',color:'slate',mode:'hit',playlist:''}))}
   if(a==='del'){btn.closest('.catrow').remove()}
   if(a==='up'){const r=btn.closest('.catrow');r.previousElementSibling&&r.parentNode.insertBefore(r,r.previousElementSibling)}
-  if(a==='export'){$('#bk').value=JSON.stringify({rinkboard:1,cats:S.cats,cues:S.cues},null,1);$('#bk').select()}
+  if(a==='export'){$('#bk').value=JSON.stringify({rinkboard:1,cats:S.cats,cues:S.cues,keepPl:S.keepPl},null,1);$('#bk').select()}
   if(a==='import'){
     try{const j=JSON.parse($('#bk').value);if(!Array.isArray(j.cats))throw 0;
       S.cats=j.cats.map(c=>({id:c.id||uid(),name:String(c.name||'Untitled'),color:COLORS[c.color]?c.color:'slate',mode:c.mode==='run'?'run':'hit',playlist:parsePlaylistId(c.playlist)||''}));
-      S.cues=Object.assign(S.cues,j.cues||{});S.current=S.cats[0]?.id||null;save();openSetup();renderAll();preloadAll();toast('Backup imported.');
+      S.cues=Object.assign(S.cues,j.cues||{});if(j.keepPl)S.keepPl=parsePlaylistId(j.keepPl)||S.keepPl;S.current=S.cats[0]?.id||null;save();openSetup();renderAll();preloadAll();toast('Backup imported.');
     }catch{toast('That backup text isn’t valid.')}
   }
   if(a==='reloadall'){S.cache={};save();renderPanel();preloadAll();toast('Reloading playlists.')}
   if(a==='cancel') $('#dlgSet').close();
   if(a==='savecfg'){
-    const cats=readCats();if(!cats)return;
-    const kaRaw=$('#ka').value.trim(),ka=parseKeep(kaRaw);
-    if(kaRaw&&!ka){toast('The keep-alive link needs to be a Spotify track or episode link.');$('#ka').focus();return}
-    S.keepAlive=ka;
-    S.clientId=$('#cid').value.trim();S.cats=cats;
+    const d=readDraft();if(!d)return;
+    S.clientId=d.clientId;S.cats=d.cats;S.keepPl=d.keepPl;
     if(!S.cats.find(c=>c.id===S.current)) S.current=S.cats[0]?.id||null;
-    const used=new Set(cats.map(c=>c.playlist));for(const k of Object.keys(S.cache)) if(!used.has(k)) delete S.cache[k];
+    const used=new Set([S.keepPl,...S.cats.map(c=>c.playlist)]);for(const k of Object.keys(S.cache)) if(!used.has(k)) delete S.cache[k];
     save();$('#dlgSet').close();renderAll();if(tok)preloadAll();
   }
 });
@@ -616,6 +643,7 @@ async function keepAwake(){try{if('wakeLock' in navigator&&!document.hidden&&tok
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){keepAwake();poll()}});
 
 (async()=>{
+  $('#ver').textContent='v'+VERSION;document.title='Rink Board v'+VERSION;
   try{await handleRedirect()}catch(e){toast(e.message)}
   renderAll();
   if(tok){poll();keepAwake();preloadAll()}
