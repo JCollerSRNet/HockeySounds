@@ -282,6 +282,7 @@ async function sendPlay(body){
 async function stopAudio(){
   const k=keepUri();
   if(!k) return api('/me/player/pause',{method:'PUT',query:devQuery()});
+  busyUntil=Date.now()+5000;
   await sendPlay({uris:[k]});
   standby=true;
   await api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
@@ -297,7 +298,7 @@ async function playTrack(cat,t,startOverride){
     ?{context_uri:'spotify:playlist:'+cat.playlist,offset:{uri:t.uri},position_ms:pos}
     :{uris:[t.uri],position_ms:pos};
   now={uri:t.uri,name:t.name,artist:t.artist,img:t.img,dur:t.dur,progress:pos,playing:true,ts:Date.now()};
-  standby=false;renderNow();
+  standby=false;busyUntil=Date.now()+5000;manualPauseUntil=0;renderNow();
   try{
     await sendPlay(body);
     if(keepUri()) api('/me/player/repeat',{method:'PUT',query:{state:'off',...devQuery()}}).catch(()=>{});
@@ -337,6 +338,7 @@ async function togglePlay(){
   if(!tok) return;
   const playing=now?.playing;
   try{
+    if(playing) manualPauseUntil=Date.now()+20000;
     await api('/me/player/'+(playing?'pause':'play'),{method:'PUT',query:devQuery()});
     if(!playing) restoreVol();
     if(now){now.progress=livePos();now.playing=!playing;now.ts=Date.now()}
@@ -345,6 +347,25 @@ async function togglePlay(){
 }
 function livePos(){if(!now)return 0;return Math.min(now.dur||Infinity,now.progress+(now.playing?Date.now()-now.ts:0))}
 
+/* Watchdog: whenever nothing is playing (song ended, playlist ran out, Spotify got interrupted),
+   switch to the keep-alive track before the phone drops off Spotify Connect. */
+let idleSince=0,busyUntil=0,manualPauseUntil=0,reviving=false,dropWarned=false;
+async function watchdog(j){
+  if(!keepUri()||reviving||fading||Date.now()<busyUntil) return;
+  const playing=!!j?.is_playing;
+  if(playing){
+    idleSince=0;dropWarned=false;
+    if(standby&&j.repeat_state!=='track') api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
+    return;
+  }
+  if(Date.now()<manualPauseUntil) return;
+  idleSince||=Date.now();
+  if(Date.now()-idleSince<3000) return;
+  reviving=true;
+  try{await stopAudio();idleSince=0;dropWarned=false;renderNow()}
+  catch(e){if((e.nodevice||e.status===404)&&!dropWarned){dropWarned=true;noDevice()}}
+  finally{reviving=false}
+}
 let pollT;
 async function poll(){
   clearTimeout(pollT);
@@ -357,6 +378,7 @@ async function poll(){
       const im=t?.album?.images||t?.images||[];
       now=t?{uri:t.uri,name:t.name,artist:t.artists?t.artists.map(a=>a.name).join(', '):(t.show?.name||''),img:(im[2]||im[0]||{}).url||'',dur:t.duration_ms,progress:j.progress_ms||0,playing:!!j.is_playing,ts:Date.now()}:null;
       renderNow();renderHeader();
+      watchdog(j);
     }catch{}
   }
   pollT=setTimeout(poll,2500);
@@ -414,7 +436,7 @@ function renderClock(){
 }
 function renderNow(){
   $('#nowTitle').textContent=now?.name||(standby?'Standing by':'Nothing playing');
-  $('#nowArtist').textContent=now?.artist||(tok?'Tap a song to start':'Connect Spotify to start');
+  $('#nowArtist').textContent=now?.artist||(standby?'Keeping Spotify awake':tok?'Tap a song to start':'Connect Spotify to start');
   const a=$('#nowArt');if(now?.img){a.src=now.img;a.style.visibility='visible'}else a.style.visibility='hidden';
   $('#ppBtn').innerHTML=now?.playing?ICON_PAUSE:ICON_PLAY;
   $('#fadeBtn').textContent=devState&&!devState.supports_volume?'Stop':'Fade out';
