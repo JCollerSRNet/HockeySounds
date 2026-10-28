@@ -179,6 +179,7 @@ let toastT;
 function toast(msg){const t=$('#toast');const host=document.querySelector('dialog[open]')||document.body;if(t.parentNode!==host)host.appendChild(t);t.textContent=msg;t.classList.add('show');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),4200)}
 function parsePlaylistId(s){s=(s||'').trim();const m=s.match(/playlist[/:]([A-Za-z0-9]{22})/);if(m)return m[1];return /^[A-Za-z0-9]{22}$/.test(s)?s:null}
 const ICON_PLAY='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg>';
+const ICON_STOP='<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>';
 const ICON_PAUSE='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
 
 /* ---------- Auth (PKCE, no server needed) ---------- */
@@ -282,7 +283,7 @@ async function sendPlay(body){
 async function stopAudio(){
   const k=keepUri();
   if(!k) return api('/me/player/pause',{method:'PUT',query:devQuery()});
-  busyUntil=Date.now()+5000;
+  busyUntil=Date.now()+3000;
   await sendPlay({uris:[k]});
   standby=true;
   await api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
@@ -294,11 +295,16 @@ function noDevice(){
 async function playTrack(cat,t,startOverride){
   fadeJob++;fading=false;
   const pos=startOverride??S.cues[t.uri]??0;
-  const body=cat.mode==='run'&&cat.playlist
-    ?{context_uri:'spotify:playlist:'+cat.playlist,offset:{uri:t.uri},position_ms:pos}
-    :{uris:[t.uri],position_ms:pos};
+  // With a keep-alive set, the silent track is queued right after the music, so Spotify goes
+  // straight from the last song into silence with no paused gap for the phone to drop off in.
+  const k=keepUri(),tr=S.cache[cat.playlist]?.tracks||[];
+  let body;
+  if(cat.mode==='run'&&cat.playlist){
+    if(k){const i=Math.max(0,tr.findIndex(x=>x.uri===t.uri));body={uris:[...tr.slice(i,i+99).map(x=>x.uri),k],position_ms:pos}}
+    else body={context_uri:'spotify:playlist:'+cat.playlist,offset:{uri:t.uri},position_ms:pos};
+  }else body={uris:k?[t.uri,k]:[t.uri],position_ms:pos};
   now={uri:t.uri,name:t.name,artist:t.artist,img:t.img,dur:t.dur,progress:pos,playing:true,ts:Date.now()};
-  standby=false;busyUntil=Date.now()+5000;manualPauseUntil=0;renderNow();
+  standby=false;busyUntil=Date.now()+3000;renderNow();
   try{
     await sendPlay(body);
     if(keepUri()) api('/me/player/repeat',{method:'PUT',query:{state:'off',...devQuery()}}).catch(()=>{});
@@ -336,9 +342,15 @@ async function fadeOut(){
 function restoreVol(){if(savedVol==null)return;const v=savedVol;savedVol=null;api('/me/player/volume',{method:'PUT',query:{volume_percent:v,...devQuery()}}).catch(()=>{})}
 async function togglePlay(){
   if(!tok) return;
+  if(keepUri()){
+    if(!now){toast('Standing by. Tap a song to play.');return}
+    fadeJob++;fading=false;
+    try{await stopAudio();now=null;renderNow();restoreVol()}
+    catch(e){e.nodevice||e.status===404?noDevice():toast(e.message)}
+    return;
+  }
   const playing=now?.playing;
   try{
-    if(playing) manualPauseUntil=Date.now()+20000;
     await api('/me/player/'+(playing?'pause':'play'),{method:'PUT',query:devQuery()});
     if(!playing) restoreVol();
     if(now){now.progress=livePos();now.playing=!playing;now.ts=Date.now()}
@@ -349,20 +361,17 @@ function livePos(){if(!now)return 0;return Math.min(now.dur||Infinity,now.progre
 
 /* Watchdog: whenever nothing is playing (song ended, playlist ran out, Spotify got interrupted),
    switch to the keep-alive track before the phone drops off Spotify Connect. */
-let idleSince=0,busyUntil=0,manualPauseUntil=0,reviving=false,dropWarned=false;
+let busyUntil=0,reviving=false,dropWarned=false;
 async function watchdog(j){
   if(!keepUri()||reviving||fading||Date.now()<busyUntil) return;
   const playing=!!j?.is_playing;
   if(playing){
-    idleSince=0;dropWarned=false;
+    dropWarned=false;
     if(standby&&j.repeat_state!=='track') api('/me/player/repeat',{method:'PUT',query:{state:'track',...devQuery()}}).catch(()=>{});
     return;
   }
-  if(Date.now()<manualPauseUntil) return;
-  idleSince||=Date.now();
-  if(Date.now()-idleSince<3000) return;
   reviving=true;
-  try{await stopAudio();idleSince=0;dropWarned=false;renderNow()}
+  try{await stopAudio();dropWarned=false;renderNow()}
   catch(e){if((e.nodevice||e.status===404)&&!dropWarned){dropWarned=true;noDevice()}}
   finally{reviving=false}
 }
@@ -381,7 +390,7 @@ async function poll(){
       watchdog(j);
     }catch{}
   }
-  pollT=setTimeout(poll,2500);
+  pollT=setTimeout(poll,2000);
 }
 setInterval(()=>{if(now?.playing)renderClock()},250);
 
@@ -438,7 +447,9 @@ function renderNow(){
   $('#nowTitle').textContent=now?.name||(standby?'Standing by':'Nothing playing');
   $('#nowArtist').textContent=now?.artist||(standby?'Keeping Spotify awake':tok?'Tap a song to start':'Connect Spotify to start');
   const a=$('#nowArt');if(now?.img){a.src=now.img;a.style.visibility='visible'}else a.style.visibility='hidden';
-  $('#ppBtn').innerHTML=now?.playing?ICON_PAUSE:ICON_PLAY;
+  const pp=$('#ppBtn');
+  if(keepUri()){pp.innerHTML=ICON_STOP;pp.setAttribute('aria-label','Stop');pp.style.visibility=now?'visible':'hidden'}
+  else{pp.innerHTML=now?.playing?ICON_PAUSE:ICON_PLAY;pp.setAttribute('aria-label','Play or pause');pp.style.visibility='visible'}
   $('#fadeBtn').textContent=devState&&!devState.supports_volume?'Stop':'Fade out';
   $('#lamp').classList.toggle('on',!!now?.playing);
   document.querySelectorAll('.tile').forEach(el=>el.classList.toggle('on',el.dataset.uri===now?.uri));
