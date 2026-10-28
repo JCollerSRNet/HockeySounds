@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#0C1B2E" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Rink Board v0.7</title>
+<title>Rink Board v0.9</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
@@ -112,6 +112,13 @@ code{display:block;padding:8px;border-radius:6px;background:var(--bg);font-size:
 .dev small{margin-left:auto;color:var(--muted)}
 .dev[aria-current="true"]{border-color:var(--blueline);box-shadow:inset 0 0 0 1px var(--blueline)}
 .readout{font:700 44px/1 'Barlow Condensed',sans-serif;font-variant-numeric:tabular-nums;text-align:center;margin:10px 0 0}
+.dbg{margin-top:8px;max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
+.dbg div{display:grid;grid-template-columns:auto auto 3.4em auto;gap:0 8px;padding:5px 8px;border-bottom:1px solid var(--line)}
+.dbg .p{grid-column:1/-1;color:var(--muted);word-break:break-all}
+.dbg .ok{color:#1E9467}.dbg .warn{color:#D98E00}.dbg .bad{color:var(--goal);font-weight:700}
+.dbgsum{font:13px ui-monospace,Menlo,Consolas,monospace;color:var(--ink)}
+.chk{display:flex;align-items:center;gap:8px;margin:10px 0 0;color:var(--ink);font-size:14px}
+.chk input{width:auto}
 .toast{position:fixed;left:12px;right:12px;bottom:calc(96px + env(safe-area-inset-bottom));z-index:20;padding:12px 14px;border-radius:10px;background:var(--ink);color:var(--bg);font-size:15px;line-height:1.35;opacity:0;transform:translateY(8px);pointer-events:none;transition:opacity .2s,transform .2s}
 .toast.show{opacity:1;transform:none}
 @media (prefers-reduced-motion: reduce){*{transition:none!important}}
@@ -149,7 +156,7 @@ code{display:block;padding:8px;border-radius:6px;background:var(--bg);font-size:
 
 <script>
 /* ---------- State ---------- */
-const VERSION='0.7'; // bump on every change so you can tell when the new build is live
+const VERSION='0.9'; // bump on every change so you can tell when the new build is live
 const LS='rinkboard.v1', TK='rinkboard.tok', PK='rinkboard.pkce';
 const SCOPES='user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private playlist-read-collaborative';
 const REDIRECT=location.origin+location.pathname;
@@ -196,8 +203,12 @@ async function login(){
   location.href='https://accounts.spotify.com/authorize?'+new URLSearchParams({response_type:'code',client_id:S.clientId,scope:SCOPES,redirect_uri:REDIRECT,code_challenge_method:'S256',code_challenge:ch,state});
 }
 async function tokenRequest(params){
-  const r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:S.clientId,...params})});
+  const t0=performance.now();
+  let r;
+  try{r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({client_id:S.clientId,...params})})}
+  catch(e){logReq({m:'POST',p:'accounts /api/token ('+params.grant_type+')',s:'NETERR',err:e.message});throw e}
   const j=await r.json().catch(()=>({}));
+  logReq({m:'POST',p:'accounts /api/token ('+params.grant_type+')',s:r.status,ms:Math.round(performance.now()-t0),err:r.ok?undefined:(j.error_description||j.error)});
   if(!r.ok) throw new Error(j.error_description||j.error||'Spotify sign-in failed');
   tok={access:j.access_token,refresh:j.refresh_token||tok?.refresh,exp:Date.now()+(j.expires_in-60)*1000};
   localStorage.setItem(TK,JSON.stringify(tok));
@@ -221,16 +232,55 @@ async function accessToken(force){
 function signOut(){tok=null;localStorage.removeItem(TK);now=null;renderAll()}
 
 /* ---------- Spotify API ---------- */
+/* ---------- Debug log: every Spotify request with its status and timing ---------- */
+const DL='rinkboard.log';
+let dlog=(()=>{try{return JSON.parse(localStorage.getItem(DL)||'[]')}catch{return []}})(),dlogT;
+function logReq(e){
+  dlog.push({t:Date.now(),...e});if(dlog.length>300)dlog.splice(0,dlog.length-300);
+  clearTimeout(dlogT);dlogT=setTimeout(()=>{try{localStorage.setItem(DL,JSON.stringify(dlog))}catch{}},1000);
+  if($('#dbgLog'))renderLog();
+}
+const isPoll=e=>e.m==='GET'&&/^\/me\/player(\?|$)/.test(e.p);
+const stClass=s=>s==='SKIP'?'warn':typeof s!=='number'||s===429||s>=500?'bad':s>=400?'warn':'ok';
+const hhmmss=t=>new Date(t).toTimeString().slice(0,8);
+function renderLog(){
+  const box=$('#dbgLog');if(!box)return;
+  const showPoll=$('#dbgPoll')?.checked;
+  const rows=dlog.filter(e=>showPoll||!isPoll(e)).slice(-150).reverse();
+  const n429=dlog.filter(e=>e.s===429).length,nErr=dlog.filter(e=>stClass(e.s)==='bad'&&e.s!==429).length,last=[...dlog].reverse().find(e=>e.s===429);
+  $('#dbgSum').textContent=`${dlog.length} logged, ${n429} rate-limited (429), ${nErr} other errors${last?', last 429 at '+hhmmss(last.t)+(last.ra?' (Retry-After '+last.ra+'s)':''):''}${Date.now()<coolUntil?'. Paused for '+Math.ceil((coolUntil-Date.now())/1000)+'s.':''}`;
+  box.innerHTML=rows.length?rows.map(e=>`<div><span>${hhmmss(e.t)}</span><b>${esc(e.m)}</b><span class="${stClass(e.s)}">${esc(e.s)}</span><span>${e.ms!=null?e.ms+'ms':''}${e.ra?' RA '+esc(e.ra)+'s':''}</span><span class="p">${esc(e.p)}${e.err?'<br>'+esc(e.err):''}</span></div>`).join(''):'<div><span class="p">Nothing logged yet.</span></div>';
+}
+function logText(){
+  return [`Rink Board v${VERSION}`,navigator.userAgent,`Device: ${S.deviceName||'(active device)'} ${S.deviceId||''}`,`Silence playlist: ${S.keepPl||'none'}`,'',
+    ...dlog.map(e=>`${hhmmss(e.t)} ${e.m} ${e.s}${e.ms!=null?' '+e.ms+'ms':''}${e.ra?' RA='+e.ra:''} ${e.p}${e.err?' | '+e.err:''}`)].join('\n');
+}
+
+let coolUntil=0;
 async function api(path,{method='GET',body,query}={},retry=true){
+  const lp=path+(query&&Object.keys(query).length?'?'+new URLSearchParams(query):'');
+  if(Date.now()<coolUntil){logReq({m:method,p:lp,s:'SKIP',err:'Not sent: waiting out rate limit'});const e=new Error(`Spotify asked the app to slow down. Try again in ${Math.ceil((coolUntil-Date.now())/1000)} seconds.`);e.status=429;throw e}
   let url='https://api.spotify.com/v1'+path;
   if(query&&Object.keys(query).length) url+='?'+new URLSearchParams(query);
   let t;try{t=await accessToken()}catch(e){signOut();throw e}
-  const r=await fetch(url,{method,headers:{Authorization:'Bearer '+t,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),12000);
+  let r;const t0=performance.now();
+  try{r=await fetch(url,{method,signal:ctl.signal,headers:{Authorization:'Bearer '+t,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined})}
+  catch(e){logReq({m:method,p:lp,s:e.name==='AbortError'?'TIMEOUT':'NETERR',ms:Math.round(performance.now()-t0),err:e.message});throw new Error(e.name==='AbortError'?'Spotify didn’t respond in time. Check the connection and try again.':'Network error: '+e.message)}
+  finally{clearTimeout(timer)}
+  const entry={m:method,p:lp,s:r.status,ms:Math.round(performance.now()-t0),ra:r.headers.get('Retry-After')||undefined};
+  if(r.ok||r.status===401||r.status===429) logReq(entry);
   if(r.status===401&&retry){try{await accessToken(true)}catch(e){signOut();throw e}return api(path,{method,body,query},false)}
-  if(r.status===429&&retry){await sleep((+r.headers.get('Retry-After')||1)*1000);return api(path,{method,body,query},false)}
+  if(r.status===429){
+    // Wait out short limits once; for long ones, stop calling Spotify until the window passes
+    const wait=+r.headers.get('Retry-After')||5;
+    if(retry&&wait<=5){await sleep(wait*1000);return api(path,{method,body,query},false)}
+    coolUntil=Date.now()+wait*1000;
+    const e=new Error(`Spotify is rate-limiting this app. Try again in ${wait<120?wait+' seconds':Math.ceil(wait/60)+' minutes'}.`);e.status=429;throw e;
+  }
   if(r.status===204||r.status===202) return null;
   const txt=await r.text();let j=null;try{j=txt?JSON.parse(txt):null}catch{}
-  if(!r.ok){const e=new Error(j?.error?.message||('Spotify error '+r.status));e.status=r.status;e.reason=j?.error?.reason;throw e}
+  if(!r.ok){logReq({...entry,err:(j?.error?.message||'')+(j?.error?.reason?' ['+j.error.reason+']':'')});const e=new Error(j?.error?.message||('Spotify error '+r.status));e.status=r.status;e.reason=j?.error?.reason;throw e}
   return j;
 }
 const devQuery=()=>S.deviceId?{device_id:S.deviceId}:{};
@@ -375,7 +425,7 @@ async function poll(){
       renderNow();renderHeader();
     }catch{}
   }
-  pollT=setTimeout(poll,2000);
+  pollT=setTimeout(poll,Date.now()<coolUntil?coolUntil-Date.now()+500:now?.playing?4000:10000);
 }
 setInterval(()=>{if(now?.playing)renderClock()},250);
 
@@ -499,7 +549,7 @@ $('#cueBody').addEventListener('click',e=>{
 });
 
 /* ---------- Settings ---------- */
-let myPls=null,myPlsErr='';
+let plLoading=false,myPlsErr='';
 async function fetchMyPlaylists(){
   const me=await api('/me');const out=[];
   let path='/me/playlists',query={limit:50};
@@ -511,11 +561,11 @@ async function fetchMyPlaylists(){
     }
     if(j?.next){const u=new URL(j.next);path=u.pathname.replace(/^\/v1/,'');query=Object.fromEntries(u.searchParams)}else path=null;
   }
-  myPls=out.sort((a,b)=>a.name.localeCompare(b.name));
+  S.myPls=out.sort((a,b)=>a.name.localeCompare(b.name));save();
 }
 // A playlist picker: dropdown of your playlists, with a paste-a-link fallback
 function picker(sel,label,noneText){
-  const opts=myPls||[];
+  const myPls=S.myPls,opts=myPls||[];
   const known=!sel||opts.some(p=>p.id===sel);
   if(!myPls) return `<div class="pick"><input class="plink" value="${sel?'https://open.spotify.com/playlist/'+sel:''}" placeholder="Spotify playlist link" aria-label="${esc(label)}" autocomplete="off"></div>`;
   return `<div class="pick"><select class="psel" aria-label="${esc(label)}">
@@ -526,12 +576,12 @@ function picker(sel,label,noneText){
     </select>
     <input class="plink" hidden placeholder="Spotify playlist link" aria-label="${esc(label)} link" autocomplete="off"></div>`;
 }
-function readPick(el){
+function readPick(el,silent){
   const sel=el.querySelector('.psel'),link=el.querySelector('.plink');
   if(sel&&sel.value!=='__link') return {ok:true,id:sel.value};
   const raw=link.value.trim();if(!raw) return {ok:true,id:''};
   const id=parsePlaylistId(raw);
-  if(!id){toast('That doesn’t look like a playlist link: '+raw.slice(0,60));link.focus();return {ok:false}}
+  if(!id){if(silent)return {ok:true,id:''};toast('That doesn’t look like a playlist link: '+raw.slice(0,60));link.focus();return {ok:false}}
   return {ok:true,id};
 }
 function catRow(c){
@@ -543,12 +593,21 @@ function catRow(c){
     <div class="actions" style="margin-top:8px"><button class="btn" type="button" data-act="up">Move up</button><button class="btn warn" type="button" data-act="del">Remove</button></div>
   </div>`;
 }
-async function openSetup(draft){
+async function refreshPlaylistList(){
+  if(plLoading||!tok) return;
+  plLoading=true;myPlsErr='';setPlStatus();
+  try{await fetchMyPlaylists()}catch(e){myPlsErr=e.message}
+  plLoading=false;
+  // Redraw the open sheet with the new list, keeping anything already changed
+  if($('#dlgSet').open&&$('#catEdit')) openSetup(readDraft(true));
+}
+function setPlStatus(){
+  const el=$('#plStatus');if(!el)return;
+  el.textContent=plLoading?'Updating your playlist list…':myPlsErr?'Couldn’t load your playlists ('+myPlsErr+'). You can still paste links.':S.myPls?'Pick a playlist for each category. Only playlists you own or collaborate on are listed, because Spotify won’t share songs from others.':'Connect Spotify to pick from your playlists, or paste links.';
+}
+function openSetup(draft){
   if(!$('#dlgSet').open) $('#dlgSet').showModal();
-  if(tok&&!myPls){
-    $('#setBody').innerHTML='<h3>Settings</h3><p>Loading your playlists…</p>';
-    try{await fetchMyPlaylists();myPlsErr=''}catch(e){myPlsErr=e.message}
-  }
+  if(tok&&!S.myPls&&!plLoading&&!myPlsErr) refreshPlaylistList();
   const d=draft||{cats:S.cats,keepPl:S.keepPl,clientId:S.clientId};
   $('#setBody').innerHTML=`<h3>Settings</h3>
     <h4>Spotify</h4>
@@ -561,26 +620,34 @@ async function openSetup(draft){
     <p>Phones drop off Spotify Connect soon after Spotify pauses. With this set, every stop switches straight to this playlist on loop, and songs roll into it when they end. Fill it with silent tracks.</p>
     <div id="keepPick">${picker(d.keepPl,'Silence playlist','None (pause instead)')}</div>
     <h4>Categories</h4>
-    <p>${myPls?'Pick a playlist for each category. Only playlists you own or collaborate on are listed, because Spotify won’t share songs from others.':myPlsErr?'Couldn’t load your playlists ('+esc(myPlsErr)+'). Paste links instead.':'Connect Spotify to pick from your playlists, or paste links.'}</p>
+    <p id="plStatus"></p>
     ${tok?'<div class="actions" style="margin-top:6px"><button class="btn" type="button" data-act="refreshpls">Refresh playlist list</button></div>':''}
     <div id="catEdit">${d.cats.map(catRow).join('')}</div>
     <div class="actions"><button class="btn" type="button" data-act="add">Add category</button></div>
+    <h4>Debug</h4>
+    <p>Every request to Spotify, newest first. Copy the log to share it when something goes wrong.</p>
+    <p class="dbgsum" id="dbgSum"></p>
+    <label class="chk"><input type="checkbox" id="dbgPoll"> Show playback checks (GET /me/player)</label>
+    <div class="dbg" id="dbgLog"></div>
+    <div class="actions"><button class="btn" type="button" data-act="logcopy">Copy log</button><button class="btn warn" type="button" data-act="logclear">Clear log</button></div>
     <h4>Backup</h4>
     <p>Copy this text somewhere safe to keep your categories and start points. Paste a backup here and tap Import to restore.</p>
     <textarea id="bk" spellcheck="false"></textarea>
     <div class="actions"><button class="btn" type="button" data-act="export">Show backup</button><button class="btn" type="button" data-act="import">Import</button><button class="btn" type="button" data-act="reloadall">Reload all playlists</button></div>
     <div class="actions" style="position:sticky;bottom:0;background:var(--surface);padding:10px 0 0"><button class="btn" type="button" data-act="cancel">Cancel</button><button class="btn primary" type="button" data-act="savecfg">Save</button></div>`;
+  setPlStatus();renderLog();
 }
-function readDraft(){
+function readDraft(silent){
   const cats=[];
   for(const r of document.querySelectorAll('#catEdit .catrow')){
-    const p=readPick(r.querySelector('.pick'));if(!p.ok) return null;
+    const p=readPick(r.querySelector('.pick'),silent);if(!p.ok) return null;
     cats.push({id:r.dataset.id,name:r.querySelector('.nm').value.trim()||'Untitled',color:r.querySelector('.cl').value,mode:r.querySelector('.md').value,playlist:p.id});
   }
-  const k=readPick($('#keepPick .pick'));if(!k.ok) return null;
+  const k=readPick($('#keepPick .pick'),silent);if(!k.ok) return null;
   return {cats,keepPl:k.id,clientId:$('#cid').value.trim()};
 }
 $('#setBody').addEventListener('change',e=>{
+  if(e.target.id==='dbgPoll') renderLog();
   if(e.target.classList.contains('cl'))e.target.closest('.catrow').style.setProperty('--c',COLORS[e.target.value]);
   if(e.target.classList.contains('psel')){const l=e.target.parentNode.querySelector('.plink');l.hidden=e.target.value!=='__link';if(!l.hidden)l.focus()}
 });
@@ -588,8 +655,8 @@ $('#setBody').addEventListener('click',async e=>{
   const btn=e.target.closest('[data-act]');if(!btn)return;const a=btn.dataset.act;
   if(a==='copy'){try{await navigator.clipboard.writeText(REDIRECT);toast('Redirect URI copied.')}catch{toast('Copy failed. Select the text and copy it.')}}
   if(a==='login'){S.clientId=$('#cid').value.trim();save();login()}
-  if(a==='logout'){signOut();myPls=null;openSetup()}
-  if(a==='refreshpls'){const d=readDraft();if(!d)return;myPls=null;openSetup(d)}
+  if(a==='logout'){signOut();S.myPls=null;save();openSetup()}
+  if(a==='refreshpls'){myPlsErr='';refreshPlaylistList()}
   if(a==='add'){$('#catEdit').insertAdjacentHTML('beforeend',catRow({id:uid(),name:'New category',color:'slate',mode:'hit',playlist:''}))}
   if(a==='del'){btn.closest('.catrow').remove()}
   if(a==='up'){const r=btn.closest('.catrow');r.previousElementSibling&&r.parentNode.insertBefore(r,r.previousElementSibling)}
@@ -601,6 +668,8 @@ $('#setBody').addEventListener('click',async e=>{
     }catch{toast('That backup text isn’t valid.')}
   }
   if(a==='reloadall'){S.cache={};save();renderPanel();preloadAll();toast('Reloading playlists.')}
+  if(a==='logcopy'){try{await navigator.clipboard.writeText(logText());toast('Log copied.')}catch{$('#bk').value=logText();toast('Copy failed, so the log is in the Backup box. Select it and copy.')}}
+  if(a==='logclear'){dlog=[];localStorage.removeItem(DL);renderLog()}
   if(a==='cancel') $('#dlgSet').close();
   if(a==='savecfg'){
     const d=readDraft();if(!d)return;
